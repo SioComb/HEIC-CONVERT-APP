@@ -169,21 +169,5 @@ UI 更新は `root.after(...)` でメインスレッドにディスパッチ。
 
 ## ライセンス / License
 
-MIT（想定） / MIT (suggested). Replace as appropriate.
+MIT
 
----
-
-## 謝辞 / Acknowledgements
-
-- [Pillow](https://pypi.org/project/pillow/) – The friendly PIL fork  
-- [pillow-heif](https://github.com/ai-forever/pillow_heif) – HEIF/HEIC decoder for Pillow  
-- [`tkinterdnd2`](https://pypi.org/project/tkinterdnd2/) – Drag & Drop for Tkinter (optional)
-
----
-
-## 連絡 / Support
-
-問題や改善案は、GUI ログの **エラー行（フルスタックトレース）** と一緒にお知らせください。  
-For issues or suggestions, please include the GUI log line with the **full traceback**.
-
-**Happy converting! / 快適変換ライフを！**
