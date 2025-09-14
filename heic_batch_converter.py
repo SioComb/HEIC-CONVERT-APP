@@ -1,61 +1,55 @@
-# heic_batch_converter.py
+# heic_batch_converter_debug.py
 # -*- coding: utf-8 -*-
 """
-シンプルなGUIアプリ：HEIC/HEIFをPNGまたはJPEGに一括変換
-- Windows / macOS / Linux (Python 3.9+)
-- 必要ライブラリ: Pillow, pillow-heif（任意でtkinterdnd2を使うとドラッグ&ドロップ対応）
-- 機能:
-    * ファイル追加 / フォルダ追加 / （任意）ドラッグ&ドロップ
-    * 出力形式: PNG または JPEG
-    * JPEG 品質スライダー
-    * EXIF保持（JPEGのみ）
-    * 出力先フォルダ選択（デフォルトは元フォルダ）
-    * プログレスバー + ログ
+HEIC/HEIF を PNG / JPEG に一括変換する Tkinter GUI（診断ログ強化版）
+- 例外のフルスタックをGUIログへ出力
+- 起動時に環境情報（Pillow / pillow-heif / OS / HEIF対応状況）を表示
 """
 
-import os
 import sys
+import platform
 import threading
+import traceback
 from pathlib import Path
 from typing import List, Optional
 
-# --- 画像処理ライブラリの読み込み ---
-# Pillow本体と、HEIF/HEICを開けるようにする拡張を読み込み
-from PIL import Image, ImageOps
-try:
-    import pillow_heif
-    # PillowにHEIF/HEICを開くオープナーを登録（これで Image.open() がHEICを認識できる）
-    pillow_heif.register_heif_opener()
-except Exception as e:
-    # ここはGUIではなく標準出力に流す。未インストールでもアプリは起動するが変換は失敗する
-    print("HEIFオープナーの登録に失敗しました。'pillow-heif' がインストールされているか確認してください。", e)
+# --- 画像処理 / HEIF対応 ---
+from PIL import Image, ImageOps, UnidentifiedImageError, features  # Pillow本体
+import pillow_heif  # HEIC/HEIFデコーダ（フォールバックにも使用）
+pillow_heif.register_heif_opener()  # Pillow側のオープナー登録（効かない環境もあるが害はない）
+Image.MAX_IMAGE_PIXELS = None       # 超高解像度でも警告で止まらないように
 
-# --- GUI部品の読み込み ---
+# pillow-heif の情報を環境ダンプ用に取得
+pillow_heif_loaded = True
+heif_register_ok = True
+try:
+    ver = getattr(pillow_heif, "__version__", "unknown")
+    compilers = getattr(pillow_heif, "compiled_with", lambda: None)()
+    heif_summary_text = f"pillow-heif version: {ver}; compiled_with: {compilers}"
+except Exception:
+    heif_summary_text = None
+
+# --- GUI部品 ---
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 
-# --- ドラッグ&ドロップ対応（任意） ---
+# --- DnD（任意） ---
 DND_AVAILABLE = False
 try:
-    # pip install tkinterdnd2 で利用可能
     from tkinterdnd2 import DND_FILES, TkinterDnD
     DND_AVAILABLE = True
 except Exception:
     DND_AVAILABLE = False
 
-# 対応拡張子（大文字/小文字を両方含める）
 SUPPORTED_EXTS = {".heic", ".heif", ".HEIC", ".HEIF"}
 
 
 # =============================================================================
-# ユーティリティ関数
+# ユーティリティ
 # =============================================================================
 
 def collect_heic_files(paths: List[Path]) -> List[Path]:
-    """入力パス（ファイル/フォルダ混在）から、HEIC/HEIFファイルの一覧を収集する。
-    - フォルダが渡された場合は再帰的に探索（rglob）
-    - 順序を保持したまま重複を排除
-    """
+    """入力パス（ファイル/フォルダ混在）から HEIC/HEIF を収集（順序維持・重複排除）"""
     files: List[Path] = []
     for p in paths:
         p = Path(p)
@@ -64,7 +58,6 @@ def collect_heic_files(paths: List[Path]) -> List[Path]:
                 files.extend(p.rglob(f"*{ext}"))
         elif p.is_file() and p.suffix in SUPPORTED_EXTS:
             files.append(p)
-    # 重複除去（順序維持のため set + 手動フィルタ）
     seen = set()
     uniq: List[Path] = []
     for f in files:
@@ -75,10 +68,7 @@ def collect_heic_files(paths: List[Path]) -> List[Path]:
 
 
 def safe_output_path(src: Path, out_dir: Optional[Path], out_ext: str) -> Path:
-    """出力先パスを安全に決定する。
-    - 出力フォルダ未指定なら元ファイルのフォルダに保存
-    - 既に同名ファイルが存在する場合は _1, _2 ... と連番を付与
-    """
+    """出力先パスを決定（同名があれば _1, _2… を付与）"""
     base = src.stem
     dir_ = out_dir if out_dir else src.parent
     candidate = dir_ / f"{base}{out_ext}"
@@ -89,30 +79,61 @@ def safe_output_path(src: Path, out_dir: Optional[Path], out_ext: str) -> Path:
     return candidate
 
 
+def open_image_any(path: Path):
+    """HEIC/HEIF を“必ず” Pillow Image として開く。
+    1) まず Image.open を試す（成功時は EXIF/ICC も取得）
+    2) 失敗したら pillow_heif.open_heif → Image.frombytes で PIL 画像化
+    戻り値: (pil_image, exif_bytes or None, icc_bytes or None)
+    """
+    # 通常ルート（環境によっては HEIC で失敗する）
+    try:
+        im = Image.open(path)
+        exif_bytes = im.info.get("exif")
+        icc = im.info.get("icc_profile")
+        return im, exif_bytes, icc
+    except UnidentifiedImageError:
+        pass  # フォールバックへ
+
+    # フォールバック：pillow-heif で直にHEIFを開く
+    hf = pillow_heif.open_heif(path)
+
+    # EXIFの取り出し（あれば）
+    exif_bytes = None
+    try:
+        for md in getattr(hf, "metadata", []) or []:
+            # 例: {'type': 'Exif', 'data': b'...'}
+            if md.get("type", "").lower() == "exif" and md.get("data"):
+                exif_bytes = md["data"]
+                break
+    except Exception:
+        pass
+
+    # ICCプロファイル（あれば）
+    icc = None
+    try:
+        cp = getattr(hf, "color_profile", None)  # 例: {'type':'icc','icc_profile': b'...'}
+        if isinstance(cp, dict) and cp.get("icc_profile"):
+            icc = cp["icc_profile"]
+    except Exception:
+        pass
+
+    # Pillow Image を生で構築
+    im = Image.frombytes(hf.mode, hf.size, hf.data, "raw")
+    return im, exif_bytes, icc
+
+
 # =============================================================================
-# 変換処理スレッド（バックグラウンド）
+# 変換ワーカースレッド
 # =============================================================================
 
 class ConverterThread(threading.Thread):
-    """画像変換を行うワーカー・スレッド。
-    - GUIフリーズを防ぐため、重いI/Oは別スレッドで実行
-    - Tkウィジェットの操作は行わず、コールバック経由で通知のみ行う（※UI操作はメインスレッドで）
-    """
-    def __init__(
-        self,
-        files: List[Path],
-        out_dir: Optional[Path],
-        fmt: str,
-        jpg_quality: int,
-        keep_exif: bool,
-        progress_cb,   # 進行状況を通知するコールバック（done, total）
-        log_cb,        # ログ文字列を通知するコールバック（str）
-        done_cb        # 完了時に呼び出すコールバック（引数なし）
-    ):
+    """変換をバックグラウンドで実行（UI操作はコールバック経由でメインスレッドへ）"""
+    def __init__(self, files: List[Path], out_dir: Optional[Path], fmt: str,
+                 jpg_quality: int, keep_exif: bool, progress_cb, log_cb, done_cb):
         super().__init__(daemon=True)
         self.files = files
         self.out_dir = out_dir
-        self.fmt = fmt                  # "PNG" または "JPEG"
+        self.fmt = fmt
         self.jpg_quality = jpg_quality
         self.keep_exif = keep_exif
         self.progress_cb = progress_cb
@@ -120,158 +141,140 @@ class ConverterThread(threading.Thread):
         self.done_cb = done_cb
 
     def run(self):
-        """各ファイルについて順番に変換を実行する。例外は1件ずつ握りつぶして続行。"""
         total = len(self.files)
         count = 0
         for src in self.files:
+            abs_src = str(Path(src).resolve())
             try:
-                # 出力拡張子を決定
+                self.log_cb(f"… 開始: {abs_src}")
                 out_ext = ".png" if self.fmt == "PNG" else ".jpg"
                 out_path = safe_output_path(src, self.out_dir, out_ext)
 
-                # 画像を開く（pillow-heifが登録済みならHEICも開ける）
-                with Image.open(src) as im:
-                    # --- 複数フレーム（アニメーションHEIF等）対策：先頭フレームを選択 ---
-                    try:
-                        if getattr(im, "n_frames", 1) > 1:
-                            im.seek(0)
-                    except Exception:
-                        # n_framesが無い or seek不可なら無視
-                        pass
+                # --- 画像を開く（Image.open → 失敗時 open_heif フォールバック） ---
+                im, exif_bytes, icc = open_image_any(src)
 
-                    # --- EXIFの回転情報を反映：縦横が正しくなる ---
+                # アニメーションHEIF対策：先頭フレームを選択
+                try:
+                    if getattr(im, "n_frames", 1) > 1:
+                        im.seek(0)
+                except Exception as e:
+                    self.log_cb(f"！警告: フレームseekに失敗 ({e})")
+
+                # EXIFの回転情報を反映（縦横を正しく）
+                try:
                     im = ImageOps.exif_transpose(im)
+                except Exception as e:
+                    self.log_cb(f"！警告: 回転補正に失敗 ({e})")
 
-                    # --- 保存パラメータを準備 ---
-                    save_kwargs = {}
-                    exif_bytes = im.info.get("exif")          # EXIFバイナリ
-                    icc = im.info.get("icc_profile")          # ICCプロファイル
+                # 保存パラメータを用意
+                save_kwargs = {}
+                if self.fmt == "JPEG":
+                    save_kwargs["quality"] = self.jpg_quality
+                    save_kwargs["optimize"] = True
+                    save_kwargs["progressive"] = True
+                    # 指定したい場合のみ（2=4:2:0）：save_kwargs["subsampling"] = 2
+                    if icc:
+                        save_kwargs["icc_profile"] = icc
+                    if self.keep_exif and exif_bytes:
+                        save_kwargs["exif"] = exif_bytes
+                    if im.mode != "RGB":  # JPEGはRGB前提
+                        im = im.convert("RGB")
+                else:
+                    # PNGは可逆圧縮
+                    save_kwargs["optimize"] = True
+                    # 必要なら ICC を入れる
+                    # if icc:
+                    #     save_kwargs["icc_profile"] = icc
 
-                    if self.fmt == "JPEG":
-                        # JPEGは品質やプログレッシブ等を設定
-                        save_kwargs["quality"] = self.jpg_quality
-                        save_kwargs["optimize"] = True
-                        save_kwargs["progressive"] = True
-                        # subsamplingは未指定が最も互換性高いが、指定したい場合は数値で（2=4:2:0）
-                        # save_kwargs["subsampling"] = 2
-
-                        # カラープロファイルがあれば渡す（色ズレ抑制）
-                        if icc:
-                            save_kwargs["icc_profile"] = icc
-                        # EXIFを保持したい場合は付与
-                        if self.keep_exif and exif_bytes:
-                            save_kwargs["exif"] = exif_bytes
-
-                        # JPEGはRGB前提。RGBA/パレット等はRGBへ変換
-                        if im.mode not in ("RGB",):
-                            im = im.convert("RGB")
-                    else:
-                        # PNGは可逆圧縮（optimize）
-                        save_kwargs["optimize"] = True
-                        # ICCはPNGでも埋め込めるが、用途次第。必要なら下記を有効化
-                        # if icc:
-                        #     save_kwargs["icc_profile"] = icc
-
-                    # 出力フォルダを作成（なければ再帰的に作る）
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-                    # 画像を保存
+                # 出力ディレクトリを作成して保存
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
                     im.save(out_path, self.fmt, **save_kwargs)
+                except Exception as e:
+                    raise RuntimeError(f"[Save] で失敗: {e}（dest={out_path}）")
 
-                # 正常終了ログ
                 self.log_cb(f"✔ 変換完了: {src.name} → {out_path.name}")
-            except Exception as e:
-                # 1件ごとにエラーを記録して続行
-                self.log_cb(f"✖ エラー: {src}  ({e})")
+
+            except Exception:
+                # フルスタックをGUIログへ
+                tb = traceback.format_exc()
+                self.log_cb(f"✖ エラー: {abs_src}\n{tb}")
             finally:
-                # 進捗カウントを更新
                 count += 1
                 self.progress_cb(count, total)
 
-        # 全件処理後に完了コールバック
         self.done_cb()
 
 
 # =============================================================================
-# GUIアプリ本体
+# GUI本体
 # =============================================================================
 
 class App:
-    """Tkinterベースの簡易GUI。
-    - ファイル/フォルダ指定、オプション設定、進捗表示、ログ表示を担当
-    - 実処理はConverterThreadへ委譲
-    """
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("HEIC → PNG/JPEG 一括変換")
-        self.files: List[Path] = []            # 変換対象のファイルリスト
-        self.out_dir: Optional[Path] = None    # 出力先ディレクトリ（Noneなら元フォルダ）
+        self.root.title("HEIC → PNG/JPEG 一括変換（診断ログ強化）")
+        self.files: List[Path] = []
+        self.out_dir: Optional[Path] = None
 
-        # --- ルートフレーム（余白つき） ---
         outer = ttk.Frame(root, padding=12)
         outer.pack(fill="both", expand=True)
 
-        # --- ファイル一覧（ドラッグ&ドロップ可能） ---
+        # ファイルリスト
         self.listbox = tk.Listbox(outer, height=10, selectmode="extended")
         self.listbox.grid(row=0, column=0, columnspan=4, sticky="nsew", pady=(0, 8))
         self._configure_drop(self.listbox)
 
-        # --- ボタン群（追加/削除/クリア） ---
-        btn_add_files = ttk.Button(outer, text="ファイルを追加", command=self.add_files)
-        btn_add_folder = ttk.Button(outer, text="フォルダを追加", command=self.add_folder)
-        btn_remove = ttk.Button(outer, text="選択を削除", command=self.remove_selected)
-        btn_clear = ttk.Button(outer, text="リストをクリア", command=self.clear_list)
-        btn_add_files.grid(row=1, column=0, sticky="ew", pady=2)
-        btn_add_folder.grid(row=1, column=1, sticky="ew", pady=2)
-        btn_remove.grid(row=1, column=2, sticky="ew", pady=2)
-        btn_clear.grid(row=1, column=3, sticky="ew", pady=2)
+        # ボタン群
+        ttk.Button(outer, text="ファイルを追加", command=self.add_files)\
+            .grid(row=1, column=0, sticky="ew", pady=2)
+        ttk.Button(outer, text="フォルダを追加", command=self.add_folder)\
+            .grid(row=1, column=1, sticky="ew", pady=2)
+        ttk.Button(outer, text="選択を削除", command=self.remove_selected)\
+            .grid(row=1, column=2, sticky="ew", pady=2)
+        ttk.Button(outer, text="リストをクリア", command=self.clear_list)\
+            .grid(row=1, column=3, sticky="ew", pady=2)
 
-        # --- オプション領域 ---
+        # オプション
         opts = ttk.LabelFrame(outer, text="オプション", padding=10)
         opts.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(8, 8))
         opts.grid_columnconfigure(5, weight=1)
 
-        # 出力形式（PNG / JPEG）
         ttk.Label(opts, text="出力形式:").grid(row=0, column=0, sticky="w")
         self.fmt_var = tk.StringVar(value="PNG")
-        fmt_png = ttk.Radiobutton(opts, text="PNG（劣化なし）", value="PNG", variable=self.fmt_var)
-        fmt_jpg = ttk.Radiobutton(opts, text="JPEG", value="JPEG", variable=self.fmt_var)
-        fmt_png.grid(row=0, column=1, sticky="w")
-        fmt_jpg.grid(row=0, column=2, sticky="w")
+        ttk.Radiobutton(opts, text="PNG（劣化なし）", value="PNG", variable=self.fmt_var)\
+            .grid(row=0, column=1, sticky="w")
+        ttk.Radiobutton(opts, text="JPEG", value="JPEG", variable=self.fmt_var)\
+            .grid(row=0, column=2, sticky="w")
 
-        # JPEG品質（スライダー）
         ttk.Label(opts, text="JPEG品質:").grid(row=0, column=3, padx=(16, 4), sticky="e")
         self.quality = tk.IntVar(value=90)
         self.quality_scale = ttk.Scale(opts, from_=60, to=100, orient="horizontal", variable=self.quality)
         self.quality_scale.grid(row=0, column=4, sticky="ew")
         self.q_label = ttk.Label(opts, text="90")
         self.q_label.grid(row=0, column=5, padx=(6, 0), sticky="w")
-        # スライダー値の表示をライブ更新
         self.quality.trace_add("write", lambda *args: self.q_label.config(text=str(int(self.quality.get()))))
 
-        # EXIF保持（JPEGのみ有効）
         self.keep_exif = tk.BooleanVar(value=True)
-        self.chk_exif = ttk.Checkbutton(opts, text="EXIFを保持（JPEGのみ）", variable=self.keep_exif)
-        self.chk_exif.grid(row=1, column=1, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(opts, text="EXIFを保持（JPEGのみ）", variable=self.keep_exif)\
+            .grid(row=1, column=1, columnspan=2, sticky="w", pady=(8, 0))
 
-        # 出力先ディレクトリの選択
         self.out_dir_label = ttk.Label(opts, text="出力先: （元のフォルダ）")
         self.out_dir_label.grid(row=1, column=3, columnspan=2, sticky="w", pady=(8, 0))
-        btn_out = ttk.Button(opts, text="出力先を選択…", command=self.choose_out_dir)
-        btn_out.grid(row=1, column=5, sticky="e", pady=(8, 0))
+        ttk.Button(opts, text="出力先を選択…", command=self.choose_out_dir)\
+            .grid(row=1, column=5, sticky="e", pady=(8, 0))
 
-        # --- 進捗バーと開始ボタン ---
-        self.progress = ttk.Progressbar(outer, maximum=100)  # 最大値は開始時に総件数へ差し替え
+        # 進捗 & 開始
+        self.progress = ttk.Progressbar(outer, maximum=100)
         self.progress.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(0, 8))
-
         self.start_btn = ttk.Button(outer, text="変換開始", command=self.start)
         self.start_btn.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(0, 8))
 
-        # --- ログ出力（読み取り専用Text） ---
-        self.log = tk.Text(outer, height=10, state="disabled")
+        # ログ
+        self.log = tk.Text(outer, height=14, state="disabled")
         self.log.grid(row=5, column=0, columnspan=4, sticky="nsew")
 
-        # --- レイアウトの伸縮設定 ---
+        # レイアウト伸縮
         outer.grid_columnconfigure(0, weight=1)
         outer.grid_columnconfigure(1, weight=1)
         outer.grid_columnconfigure(2, weight=1)
@@ -279,42 +282,69 @@ class App:
         outer.grid_rowconfigure(0, weight=1)
         outer.grid_rowconfigure(5, weight=1)
 
-        # DnD未導入時の案内をログへ
-        if not DND_AVAILABLE:
-            self._append_log("※ ドラッグ＆ドロップを使うには 'pip install tkinterdnd2' を追加インストールしてください。\n")
+        # 起動時の環境情報ダンプ
+        self._dump_environment()
 
-    # ---- DnD有効化（tkinterdnd2がある場合のみ設定） ----
+        if not DND_AVAILABLE:
+            self._append_log("※ D&Dを使うには 'pip install tkinterdnd2' を追加インストールしてください。\n")
+
+    def _dump_environment(self):
+        """Pillow / pillow-heif / OS / HEIF対応状況など、診断に有用な情報をログ表示"""
+        try:
+            import PIL
+            pil_ver = getattr(PIL, "__version__", "unknown")
+        except Exception:
+            pil_ver = "(Pillow 不明)"
+
+        # Pillow features は環境によって 'heif' が Unknown になるので安全に判定
+        try:
+            heif_supported = bool(features.check("heif") or features.check("heif_decoder"))
+        except Exception:
+            heif_supported = False
+
+        os_info = f"{platform.system()} {platform.release()} ({platform.version()})"
+        arch_info = platform.machine()
+        py_info = sys.version.replace("\n", " ")
+
+        lines = [
+            "=== 環境情報 ===",
+            f"Pillow: {pil_ver}",
+            f"pillow-heif 読み込み: {pillow_heif_loaded}, register_ok: {heif_register_ok}",
+            f"HEIF対応（Pillow features）: {heif_supported}",
+            f"OS: {os_info}",
+            f"Arch: {arch_info}",
+            f"Python: {py_info}",
+        ]
+        if heif_summary_text:
+            lines.append(heif_summary_text)
+        lines.append("================\n")
+        for l in lines:
+            self._append_log(l + ("\n" if not l.endswith("\n") else ""))
+
     def _configure_drop(self, widget):
-        """ListboxにD&Dターゲットを登録し、ファイル/フォルダのドロップを受け付ける。"""
         if DND_AVAILABLE:
             widget.drop_target_register(DND_FILES)
             widget.dnd_bind("<<Drop>>", self._on_drop)
 
     def _on_drop(self, event):
-        """OSから渡されるドロップ文字列（空白やクォート混じり）をパースしてパス配列に整形する。"""
         raw = event.data
         paths: List[str] = []
-        buf = ""
-        in_quotes = False
+        buf, in_quotes = "", False
         for ch in raw:
             if ch == '"':
                 in_quotes = not in_quotes
                 if not in_quotes and buf:
-                    paths.append(buf)
-                    buf = ""
+                    paths.append(buf); buf = ""
             elif ch == " " and not in_quotes:
                 if buf:
-                    paths.append(buf)
-                    buf = ""
+                    paths.append(buf); buf = ""
             else:
                 buf += ch
         if buf:
             paths.append(buf)
         self.add_paths(paths)
 
-    # ---- ファイル/フォルダ追加系 ----
     def add_paths(self, paths: List[str]):
-        """渡されたパス（文字列）を収集関数へ渡し、Listbox/内部リストを更新する。"""
         files = collect_heic_files([Path(p) for p in paths])
         added = 0
         for f in files:
@@ -325,7 +355,6 @@ class App:
         self._append_log(f"+ 追加: {added} ファイル\n")
 
     def add_files(self):
-        """ファイル選択ダイアログからHEIC/HEIFファイルを追加する。"""
         paths = filedialog.askopenfilenames(
             title="HEIC/HEIF ファイルを選択",
             filetypes=[("HEIC/HEIF", "*.heic *.HEIC *.heif *.HEIF")]
@@ -334,21 +363,18 @@ class App:
             self.add_paths(list(paths))
 
     def add_folder(self):
-        """フォルダ選択ダイアログからフォルダを追加し、再帰的にHEIC/HEIFを収集する。"""
         d = filedialog.askdirectory(title="フォルダを選択")
         if d:
             self.add_paths([d])
 
     def clear_list(self):
-        """リストをクリアする（内部配列とListboxの両方）。"""
         self.files.clear()
         self.listbox.delete(0, "end")
         self._append_log("リストをクリアしました。\n")
 
     def remove_selected(self):
-        """Listboxで選択中の行を削除する。"""
         sel = list(self.listbox.curselection())
-        sel.reverse()  # 後方から削除することでインデックスずれを防ぐ
+        sel.reverse()
         for idx in sel:
             try:
                 self.files.pop(idx)
@@ -357,15 +383,12 @@ class App:
                 pass
 
     def choose_out_dir(self):
-        """出力先フォルダを選択し、ラベル表示を更新する。"""
         d = filedialog.askdirectory(title="出力先フォルダを選択")
         if d:
             self.out_dir = Path(d)
             self.out_dir_label.config(text=f"出力先: {self.out_dir}")
 
-    # ---- 変換開始 ----
     def start(self):
-        """入力チェックを行い、変換ワーカースレッドを起動。進行/ログ/完了は after でUIスレッドへ反映する。"""
         if not self.files:
             messagebox.showwarning("警告", "ファイルがありません。先に追加してください。")
             return
@@ -374,33 +397,27 @@ class App:
         jpg_q = int(self.quality.get())
         keep_exif = bool(self.keep_exif.get())
 
-        # UI初期化（ボタン無効化・プログレス初期化・開始ログ）
         self.start_btn.config(state="disabled")
         self.progress.config(value=0, maximum=len(self.files))
         self._append_log(f"=== 変換開始（{fmt}, JPEG品質={jpg_q}, EXIF保持={keep_exif}）===\n")
 
-        # --- 以下、ワーカースレッドから呼ばれるコールバックをUIスレッドで実行するため after でラップ ---
+        # ワーカーからの通知を UI スレッドにディスパッチ
         def on_progress(done, total):
-            # 進捗バー更新はメインスレッドで実施
             self.root.after(0, lambda: self.progress.config(value=done))
 
         def on_log(msg: str):
-            # ログ追記もメインスレッドにディスパッチ
-            self.root.after(0, lambda: self._append_log(msg + "\n"))
+            self.root.after(0, lambda: self._append_log(msg + ("" if msg.endswith("\n") else "\n")))
 
         def on_done():
-            # 完了時のUI更新（ボタン復帰・メッセージ表示）をメインスレッドで実行
             def _finish():
                 self._append_log("=== 完了 ===\n")
                 self.start_btn.config(state="normal")
                 messagebox.showinfo("完了", "変換が完了しました。")
             self.root.after(0, _finish)
 
-        # ワーカースレッドを起動
         t = ConverterThread(self.files, self.out_dir, fmt, jpg_q, keep_exif, on_progress, on_log, on_done)
         t.start()
 
-    # ---- ログ追記（Textを読み書き可能にしてから、末尾へ追記→自動スクロール→再び不可に） ----
     def _append_log(self, text: str):
         self.log.configure(state="normal")
         self.log.insert("end", text)
@@ -408,39 +425,24 @@ class App:
         self.log.configure(state="disabled")
 
 
-# =============================================================================
-# エントリポイント
-# =============================================================================
-
 def main():
-    """アプリ起動処理。
-    - DnD対応Tkを優先的に使用
-    - WindowsではHiDPI環境でのにじみ対策を実施
-    - テーマ設定とウィンドウ最小サイズを指定
-    """
-    # DnD対応Tkの選択（利用可能なら使う）
-    if DND_AVAILABLE:
-        root = TkinterDnD.Tk()
-    else:
-        root = tk.Tk()
+    # DnD対応Tkが使えれば優先
+    root = TkinterDnD.Tk() if DND_AVAILABLE else tk.Tk()
 
-    # WindowsのHiDPIスケーリング対策（可能な環境のみ）
+    # Windows HiDPI 簡易対策
     try:
         if sys.platform.startswith("win"):
             from ctypes import windll
-            # 1=SYSTEM_DPI_AWARE（マルチモニタ環境ではPer-Monitorにしたい場合もあるが、ここでは簡易対応）
             windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         pass
 
-    # ttkテーマの適用（vistaが使える環境なら適用）
     style = ttk.Style(root)
     if "vista" in style.theme_names():
         style.theme_use("vista")
 
-    # アプリ本体を構築してメインループへ
     App(root)
-    root.minsize(720, 520)
+    root.minsize(760, 560)
     root.mainloop()
 
 
