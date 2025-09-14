@@ -40,61 +40,6 @@ A simple Tkinter desktop GUI to batch-convert **HEIC/HEIF** into **PNG** or **JP
 
 ---
 
-## インストール / Installation
-
-### pip（公式 Python など） / Using pip
-```bash
-pip install -U pillow pillow-heif
-# optional
-pip install tkinterdnd2
-```
-
-### conda（Anaconda/Miniconda） / Using conda
-```bash
-conda activate base   # ← your env
-conda install -c conda-forge pillow-heif pillow
-# optional
-pip install tkinterdnd2
-```
-
-### インストール確認 / Verify installation
-```bash
-python -c "import PIL, pillow_heif; print('Pillow', PIL.__version__, '| pillow-heif', pillow_heif.__version__)"
-```
-
----
-
-## 実行方法 / How to Run
-
-### 1) 直接実行 / Direct
-```bash
-python heic_batch_converter_debug.py
-# or
-python heic_batch_converter.py
-```
-
-**Windows + Anaconda で確実に動かすには**、Python 実行ファイルを明示：  
-For **Windows + Anaconda**, call the interpreter explicitly:
-```powershell
-C:\Users\<YOU>\anaconda3\python.exe C:\path\to\heic_batch_converter_debug.py
-```
-
-### 2) VS Code での実行 / From VS Code
-- 右上の **“Run Python File”**（Python 拡張）で実行（**Code Runner は非推奨**）。  
-- ステータスバーのインタプリタが **Anaconda の `python.exe`** になっていることを確認。  
-- どうしても Code Runner を使う場合、`settings.json` で固定：
-```json
-{
-  "python.defaultInterpreterPath": "C:\\\\Users\\\\<YOU>\\\\anaconda3\\\\python.exe",
-  "code-runner.runInTerminal": true,
-  "code-runner.executorMap": {
-    "python": "C:\\\\Users\\\\<YOU>\\\\anaconda3\\\\python.exe -u"
-  }
-}
-```
-
----
-
 ## 使い方 / Usage
 
 1. アプリを起動（上記「実行方法」参照）。 / Launch the app.  
@@ -126,43 +71,6 @@ C:\Users\<YOU>\anaconda3\python.exe C:\path\to\heic_batch_converter_debug.py
 ### スレッド / Threading
 重い処理は `ConverterThread`（`threading.Thread`）で実行。  
 UI 更新は `root.after(...)` でメインスレッドにディスパッチ。
-
----
-
-## トラブルシューティング / Troubleshooting
-
-### `ModuleNotFoundError: No module named 'pillow_heif'`
-- インストールした Python と **別の Python** で実行している可能性。  
-  - `python -c "import sys; print(sys.executable)"` で実行中のパスを確認。  
-  - Anaconda の `...\anaconda3\python.exe` を明示、または VS Code でピン留め。
-
-### `cannot identify image file '... .HEIC'`
-- フォールバックで開ける設計です。1 枚で試し、GUI ログの **フルスタック** を確認してください。
-
-### `UserWarning: Unknown feature 'heif'`
-- 一部環境で `features.check('heif')` が Unknown になりますが、**問題ありません**（診断用）。
-
-### パス/文字化け / Path & encoding
-- まずは `C:\Temp` など ASCII パスで検証。NAS/ネットワークは一旦ローカルに。
-
-### 超高解像度の警告 / Huge images
-- `Image.MAX_IMAGE_PIXELS = None` を設定済み。必要なら制限を戻してください。
-
----
-
-## よくある質問 / FAQ
-
-- **PNG 保存時に EXIF は残る？ / Does PNG keep EXIF?**  
-  既定では残りません。必要なら PNG への EXIF/ICC 埋め込みを実装してください。
-
-- **サブサンプリング（4:4:4 / 4:2:0）を指定できる？ / Chroma subsampling?**  
-  可能です。例：`save_kwargs["subsampling"] = 2`（= 4:2:0）。
-
-- **マルチフレーム HEIF は？ / Multi‑frame HEIF?**  
-  先頭フレームのみ使用（`im.seek(0)`）。
-
-- **WebP/AVIF など他形式に出力？ / Other output formats?**  
-  現状は PNG/JPEG。Pillow のビルドに応じて拡張可能です。
 
 ---
 
