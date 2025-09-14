@@ -1,4 +1,4 @@
-# HEIC Batch Converter / HEIC一括変換GUI
+# HEIC Convert App / HEIC一括変換GUI
 
 HEIC/HEIF を **PNG** または **JPEG** に一括変換するシンプルなデスクトップ GUI（Tkinter）。  
 A simple Tkinter desktop GUI to batch-convert **HEIC/HEIF** into **PNG** or **JPEG**.
