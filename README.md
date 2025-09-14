@@ -29,7 +29,7 @@ A simple Tkinter desktop GUI to batch-convert **HEIC/HEIF** into **PNG** or **JP
 ## 動作環境 / Requirements
 
 - **Python**: 3.9+（3.12 で動作確認） / 3.9+ (tested on 3.12)  
-- **OS**: Windows / macOS / Linux  
+- **OS**: Windows11 （macOS / Linux　は未検証）  
 - **Required**:  
   - [`Pillow`](https://pypi.org/project/pillow/))  
   - [pillow-heif](https://pypi.org/project/pillow-heif/)  
