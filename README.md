@@ -16,14 +16,13 @@ A simple Tkinter desktop GUI to batch-convert **HEIC/HEIF** into **PNG** or **JP
 
 ## 主な機能 / Features
 
-- HEIC/HEIF → PNG / JPEG **一括変換** / **Batch** conversion  
-- JPEG **品質スライダー**（60–100） / JPEG **quality** slider (60–100)  
-- **EXIF** 保持（JPEGのみ、任意） / Keep **EXIF** (JPEG only, optional)  
-- **ICC** プロファイルを可能な範囲で引き回し / Carry **ICC** profile when available  
-- **出力先フォルダ**指定（未指定時は元フォルダ） / Select **output folder** (defaults to source)  
-- **進捗バー・詳細ログ** / **Progress bar & detailed log**  
-- （任意）**ドラッグ＆ドロップ**対応（[`tkinterdnd2`](https://pypi.org/project/tkinterdnd2/)） / Optional **drag & drop** via [`tkinterdnd2`](https://pypi.org/project/tkinterdnd2/)
-
+- HEIC/HEIF → PNG / JPEG **一括変換** 
+- JPEG **品質スライダー**（60–100）
+- **EXIF** 保持（JPEGのみ、任意） 
+- **ICC** プロファイルを可能な範囲で引き回し 
+- **出力先フォルダ**指定（未指定時は元フォルダ）
+- **進捗バー・詳細ログ** 
+- （任意）**ドラッグ＆ドロップ**対応（[`tkinterdnd2`](https://pypi.org/project/tkinterdnd2/)）
 ---
 
 ## 動作環境 / Requirements
